@@ -14,7 +14,6 @@ import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
-import android.util.Size
 import android.view.Surface
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2Interop
@@ -85,7 +84,7 @@ class CameraUploaderServiceV2 : Service(), LifecycleOwner {
             .setFlashMode(ImageCapture.FLASH_MODE_OFF) // Disable flash
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
             .setJpegQuality(85)
-            .setTargetRotation(android.view.Surface.ROTATION_90)
+            .setTargetRotation(Surface.ROTATION_90)
             .apply {
                 if (savedSize != null) {
                     setResolutionSelector(
@@ -137,9 +136,10 @@ class CameraUploaderServiceV2 : Service(), LifecycleOwner {
         // Monitor metadata before taking the shot
         imageAnalysis.setAnalyzer(ContextCompat.getMainExecutor(this)) { imageProxy ->
             val timestamp = imageProxy.imageInfo.timestamp
+            imageProxy.close()
             // Retrieve the matching CaptureResult from your cache
             val captureResult = captureCache.remove(timestamp)
-            Log.e(TAG, "captureResult: ${captureResult}")
+            Log.d(TAG, "captureResult: ${captureResult}")
             val iso = captureResult?.get(CaptureResult.SENSOR_SENSITIVITY) ?: 0
             val shutterSpeed = captureResult?.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: 0L // in nanoseconds
             val afState = captureResult?.get(CaptureResult.CONTROL_AF_STATE)
@@ -148,28 +148,24 @@ class CameraUploaderServiceV2 : Service(), LifecycleOwner {
             // 3. "Too Dark" Logic: skip if ISO is maxed or shutter is too slow
             // Example: Skip if ISO > 3200 or Shutter > 1/10th second (100,000,000 ns)
             if (iso > 3200 || shutterSpeed > 100_000_000L) {
-                imageProxy.close()
                 stopSelf() // Shutdown to save solar power
-                Log.e(TAG, "Dark!!")
-                imageProxy.close()
+                Log.d(TAG, "Dark!!")
                 return@setAnalyzer
             }
             if (afState != CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED
                 && afState == CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED) {
-                Log.e(TAG, "AF not converged")
-                imageProxy.close()
+                Log.d(TAG, "AF not converged")
                 return@setAnalyzer
             }
             if (aeState != null
                 && aeState != CaptureResult.CONTROL_AE_STATE_CONVERGED
                 && aeState != CaptureResult.CONTROL_AE_STATE_LOCKED) {
-                Log.e(TAG, "AE not converged: ${aeState}")
-                imageProxy.close()
+                Log.d(TAG, "AE not converged")
                 return@setAnalyzer
             }
 
             // All good. Capture the actual photo.
-            imageProxy.close()
+
             imageAnalysis.clearAnalyzer()
             takePhoto(imageCapture)
         }
@@ -177,7 +173,7 @@ class CameraUploaderServiceV2 : Service(), LifecycleOwner {
 
     private fun takePhoto(imageCapture: ImageCapture) {
         updateNotification("Capturing image...")
-        Log.e(TAG, "Capturing image...")
+        Log.d(TAG, "Capturing image...")
         imageCapture.takePicture(
             ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageCapturedCallback() {

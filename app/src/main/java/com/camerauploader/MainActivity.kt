@@ -286,10 +286,7 @@ class MainActivity : AppCompatActivity() {
         val intent = Intent(this, CameraUploaderService::class.java).apply {
             action = CameraUploaderService.ACTION_CAPTURE
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-            startForegroundService(intent)
-        else
-            startService(intent)
+        startForegroundService(intent)
     }
 
     private fun label(text: String) = TextView(this).apply {
