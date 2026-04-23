@@ -312,7 +312,7 @@ class CameraUploaderService : Service(), LifecycleOwner {
 
         // Check for darkness
         val isTooDark = iso != null && iso > 1600
-            && exposureTimeNs != null && exposureTimeNs > 33333333
+            && exposureTimeNs != null && exposureTimeNs > 33_333_333
         if (isTooDark or (aeState == CaptureResult.CONTROL_AE_STATE_FLASH_REQUIRED)) {
             on3aReady = null
             stopSelf()

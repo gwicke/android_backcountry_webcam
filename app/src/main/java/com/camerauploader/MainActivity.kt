@@ -10,8 +10,10 @@ import android.util.Size
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.*
+import androidx.annotation.OptIn
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 
@@ -40,6 +42,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AlarmScheduler.cancel(this)
         loadResolutionsAndShowDialog()
     }
 
@@ -275,10 +278,10 @@ class MainActivity : AppCompatActivity() {
         ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
     }
 
+    @OptIn(ExperimentalCamera2Interop::class)
     private fun restartUploaderService() {
         // Cancel any existing alarm, then arm a fresh one.
         // Also kick off an immediate first capture by starting the service directly.
-        AlarmScheduler.cancel(this)
         AlarmScheduler.scheduleNext(this)
         val intent = Intent(this, CameraUploaderService::class.java).apply {
             action = CameraUploaderService.ACTION_CAPTURE
