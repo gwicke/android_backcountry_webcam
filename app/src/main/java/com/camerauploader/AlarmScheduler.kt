@@ -26,7 +26,7 @@ object AlarmScheduler {
 
     /**
      * Schedule (or reschedule) the next single-shot alarm.
-     * Call this from [CameraUploaderService] at the end of each capture cycle,
+     * Call this from [CameraUploaderWorker] at the end of each capture cycle,
      * and from [BootReceiver] / [MainActivity] to start the chain.
      */
     fun scheduleNext(context: Context) {

@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.util.Log
+import androidx.core.content.ContextCompat.startForegroundService
 
 class AlarmReceiver : BroadcastReceiver() {
 
@@ -14,19 +15,9 @@ class AlarmReceiver : BroadcastReceiver() {
     }
 
     override fun onReceive(context: Context, intent: Intent) {
-        Log.d(TAG, "Alarm fired — starting capture service")
-        val activityIntent = Intent(context, CameraBridgeActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-        }
-
-        // Required for Android 14 background activity starts
-        val options = ActivityOptions.makeBasic()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            options.setPendingIntentBackgroundActivityStartMode(
-                ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
-            )
-        }
-        context.startActivity(activityIntent, options.toBundle())
+        // Directly call the service intent
+        val serviceIntent = Intent(context, CameraUploaderService::class.java)
+        startForegroundService(context, serviceIntent)
 
         // Schedule the next iteration
         AlarmScheduler.scheduleNext(context)

@@ -2,6 +2,7 @@ package com.camerauploader
 
 import android.content.Context
 import android.util.Base64
+import android.util.Size
 import androidx.core.content.edit
 
 /**
@@ -45,9 +46,9 @@ object SettingsManager {
      * Saved as "WxH" (e.g. "1920x1080"). Empty string means "let CameraX decide"
      * which will use the highest available resolution.
      */
-    fun getResolution(context: Context): android.util.Size? {
+    fun getResolution(context: Context): Size {
         val raw = prefs(context).getString(KEY_RESOLUTION, "") ?: ""
-        return if (raw.isBlank()) null else ResolutionHelper.deserialize(raw)
+        return if (raw.isBlank()) ResolutionHelper.default() else ResolutionHelper.deserialize(raw)
     }
 
     fun setResolution(context: Context, size: android.util.Size?) =

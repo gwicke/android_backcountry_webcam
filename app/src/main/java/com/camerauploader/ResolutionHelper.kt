@@ -84,10 +84,18 @@ object ResolutionHelper {
     fun serialize(size: Size): String = "${size.width}x${size.height}"
 
     /** Deserialise a "WxH" string back to a Size, or null on malformed input. */
-    fun deserialize(s: String): Size? {
+    fun deserialize(s: String): Size {
         val parts = s.split("x")
-        if (parts.size != 2) return null
-        return try { Size(parts[0].toInt(), parts[1].toInt()) } catch (_: NumberFormatException) { null }
+        if (parts.size != 2) return default()
+        return try {
+            Size(parts[0].toInt(), parts[1].toInt())
+        } catch (_: NumberFormatException) {
+            default()
+        }
+    }
+
+    fun default(): Size {
+        return Size(1024, 768)
     }
 }
 

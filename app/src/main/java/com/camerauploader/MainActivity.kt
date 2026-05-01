@@ -284,7 +284,7 @@ class MainActivity : AppCompatActivity() {
         // Also kick off an immediate first capture by starting the service directly.
         AlarmScheduler.scheduleNext(this)
         val intent = Intent(this, CameraUploaderService::class.java).apply {
-            action = CameraUploaderService.ACTION_CAPTURE
+            action = CameraUploaderWorker.ACTION_CAPTURE
         }
         startForegroundService(intent)
     }
