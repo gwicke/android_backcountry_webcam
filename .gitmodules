@@ -1,0 +1,8 @@
+[submodule "app/src/main/cpp/svtav1_enc"]
+	path = app/src/main/cpp/svtav1_enc
+	url = https://github.com/gwicke/svtav1_enc.git
+[submodule "app/src/main/cpp/SVT-AV1"]
+	path = app/src/main/cpp/SVT-AV1
+	url = https://gitlab.com/AOMediaCodec/SVT-AV1.git
+	# Pinned to the same release the svtav1_enc wrapper is tested against.
+	branch = v4.1.0

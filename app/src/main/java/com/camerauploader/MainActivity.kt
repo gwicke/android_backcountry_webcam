@@ -144,6 +144,30 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, dpToPx(2), 0, 0)
         }
 
+        // ── Upload mode ──
+        val modeLabel = label("Upload mode")
+        val modeEntries = listOf(
+            SettingsManager.UploadMode.JPEG       to "JPEG (one image per capture)",
+            SettingsManager.UploadMode.AV1_STREAM to "AV1 streaming (low bandwidth)",
+        )
+        val modeSpinner = Spinner(this).apply {
+            val adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_item,
+                modeEntries.map { it.second }
+            ).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
+            setAdapter(adapter)
+            val current = s.getUploadMode(this@MainActivity)
+            setSelection(modeEntries.indexOfFirst { it.first == current }.coerceAtLeast(0))
+        }
+        val modeNote = TextView(this).apply {
+            text = "AV1 streaming continuously encodes YUV frames and sends them " +
+                "to your server as a single long-running chunked POST."
+            textSize = 11f
+            setTextColor(0xFF888888.toInt())
+            setPadding(0, dpToPx(2), 0, 0)
+        }
+
         // ── Basic Auth ──
         val authHeader = TextView(this).apply {
             text = "Basic Auth (optional)"
@@ -193,6 +217,9 @@ class MainActivity : AppCompatActivity() {
             addView(resLabel)
             addView(resSpinner)
             addView(resNote)
+            addView(modeLabel)
+            addView(modeSpinner)
+            addView(modeNote)
             addView(authHeader)
             addView(authSubtitle)
             addView(userLabel)
@@ -222,6 +249,7 @@ class MainActivity : AppCompatActivity() {
                 s.setUploadUrl(this, url)
                 s.setIntervalSeconds(this, intervalSecs)
                 s.setResolution(this, resEntries[resSpinner.selectedItemPosition].size)
+                s.setUploadMode(this, modeEntries[modeSpinner.selectedItemPosition].first)
                 s.setAuthCredentials(
                     this,
                     userInput.text.toString().trim(),

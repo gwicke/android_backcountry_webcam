@@ -18,8 +18,30 @@ object SettingsManager {
     private const val KEY_AUTH_USERNAME  = "auth_username"
     private const val KEY_RESOLUTION     = "resolution"
     private const val KEY_AUTH_PASSWORD = "auth_password"
+    private const val KEY_UPLOAD_MODE   = "upload_mode"
 
     const val DEFAULT_INTERVAL_SECONDS = 300
+
+    /** Upload modes selectable from the settings dialog. */
+    enum class UploadMode {
+        /** One JPEG per capture, multipart/form-data POST per image. */
+        JPEG,
+        /** Continuous AV1-encoded YUV stream over a single chunked POST. */
+        AV1_STREAM;
+
+        companion object {
+            fun fromString(s: String?): UploadMode =
+                entries.firstOrNull { it.name == s } ?: JPEG
+        }
+    }
+
+    fun getUploadMode(context: Context): UploadMode =
+        UploadMode.fromString(prefs(context).getString(KEY_UPLOAD_MODE, null))
+
+    fun setUploadMode(context: Context, mode: UploadMode) =
+        prefs(context).edit { putString(KEY_UPLOAD_MODE, mode.name) }
+
+
 
     // ── Upload URL ────────────────────────────────────────────────────────────
 

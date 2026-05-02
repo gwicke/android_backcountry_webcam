@@ -13,6 +13,24 @@ android {
         targetSdk 34
         versionCode 1
         versionName "1.0"
+        // SVT-AV1 only supports 64-bit targets (it warns on 32-bit pointer
+        // sizes), so we ship arm64-v8a and x86_64 only.
+        ndk {
+            abiFilters 'arm64-v8a', 'x86_64'
+        }
+        externalNativeBuild {
+            cmake {
+                arguments '-DANDROID_STL=c++_static'
+                cppFlags ''
+                cFlags '-O2'
+            }
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.22.1'
+        }
     }
 
     buildTypes {

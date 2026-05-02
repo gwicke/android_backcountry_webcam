@@ -15,6 +15,7 @@ import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
@@ -41,6 +42,7 @@ class CameraUploaderWorker(
     val cameraProvider: ProcessCameraProvider, val lifecycleRegistry: LifecycleRegistry,
     val lifeOwner: LifecycleOwner,
     val applicationContext: android.content.Context,
+    val service: CameraUploaderService,
     val updateNotification: (String)-> Unit) {
 
     // ── Preflight state machine constants ────────────────────────────────────
@@ -65,6 +67,10 @@ class CameraUploaderWorker(
         .build()
 
     lateinit var imageCapture: ImageCapture
+    private var yuvAnalysis: ImageAnalysis? = null
+
+    private val uploadMode: SettingsManager.UploadMode
+        get() = SettingsManager.getUploadMode(applicationContext)
 
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -72,7 +78,7 @@ class CameraUploaderWorker(
     // ─────────────────────────────────────────────────────────────────────────
 
     fun run() {
-        Log.d(TAG, "Capture cycle started")
+        Log.d(TAG, "Capture cycle started (mode=$uploadMode)")
         updateNotification("Preflight — warming up 3A…")
 
         // ── Build use cases ───────────────────────────────────────────
@@ -106,15 +112,33 @@ class CameraUploaderWorker(
             }
         }
 
-        imageCapture = ImageCapture.Builder()
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-            .setJpegQuality(85)
-            // horizontal orientation; the default ROTATION_0 is
-            // portrait
-            .setFlashMode(ImageCapture.FLASH_MODE_OFF)
-            .setTargetRotation(android.view.Surface.ROTATION_90)
-            .setResolutionSelector(resolutionSelector)
-            .build()
+        // The secondary use case is mode-specific: JPEG mode uses
+        // ImageCapture; AV1 mode uses ImageAnalysis to grab a single YUV
+        // frame after 3A converges.  Either way we go through the same
+        // preflight state machine — AV1 streaming is still alarm-driven,
+        // one frame per interval.
+        val secondaryUseCase: androidx.camera.core.UseCase = when (uploadMode) {
+            SettingsManager.UploadMode.JPEG -> {
+                imageCapture = ImageCapture.Builder()
+                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                    .setJpegQuality(85)
+                    // horizontal orientation; the default ROTATION_0 is portrait
+                    .setFlashMode(ImageCapture.FLASH_MODE_OFF)
+                    .setTargetRotation(android.view.Surface.ROTATION_90)
+                    .setResolutionSelector(resolutionSelector)
+                    .build()
+                imageCapture
+            }
+            SettingsManager.UploadMode.AV1_STREAM -> {
+                yuvAnalysis = ImageAnalysis.Builder()
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+                    .setResolutionSelector(resolutionSelector)
+                    .setTargetRotation(android.view.Surface.ROTATION_90)
+                    .build()
+                yuvAnalysis!!
+            }
+        }
 
         try {
             cameraProvider.unbindAll()
@@ -122,7 +146,7 @@ class CameraUploaderWorker(
             val camera = cameraProvider.bindToLifecycle(
                 lifeOwner,
                 CameraSelector.DEFAULT_BACK_CAMERA,
-                preview, imageCapture
+                preview, secondaryUseCase
             )
 
             triggerAfAeLock(camera)
@@ -222,7 +246,10 @@ class CameraUploaderWorker(
             Log.d(TAG, "3A converged in ${elapsed}ms (af=$afState ae=$aeState)")
 
             captureState.set(State.PICTURE_TAKEN)
-            shootAndShutdown(imageCapture)
+            when (uploadMode) {
+                SettingsManager.UploadMode.JPEG       -> shootJpegAndShutdown(imageCapture)
+                SettingsManager.UploadMode.AV1_STREAM -> shootYuvAndShutdown()
+            }
         }
     }
 
@@ -253,7 +280,7 @@ class CameraUploaderWorker(
     // Final capture
     // ─────────────────────────────────────────────────────────────────────────
 
-    private fun shootAndShutdown(
+    private fun shootJpegAndShutdown(
         imageCapture: ImageCapture
     ) {
         updateNotification("Capturing image…")
@@ -275,6 +302,49 @@ class CameraUploaderWorker(
             }
         )
     }
+
+
+    /**
+     * AV1 mode: install a one-shot analyzer that grabs the next YUV frame
+     * delivered by [ImageAnalysis], converts it to contiguous I420, and
+     * hands it to the long-lived [Av1Streamer] owned by the service.  The
+     * camera is then released until the next alarm fires.
+     */
+    private fun shootYuvAndShutdown() {
+        val analysis = yuvAnalysis ?: run {
+            Log.e(TAG, "shootYuvAndShutdown: no ImageAnalysis bound")
+            shutdownCamera()
+            return
+        }
+        updateNotification("Capturing YUV frame…")
+        Log.d(TAG, "State → PICTURE_TAKEN — grabbing one YUV frame")
+
+        val streamer = service.getOrCreateAv1Streamer()
+        val grabbed = AtomicInteger(0)
+        analysis.setAnalyzer(customExecutor) { image ->
+            // KEEP_ONLY_LATEST plus this guard ensures we submit exactly
+            // one frame per alarm cycle even if the analyzer sees the same
+            // surface twice before we manage to clear it.
+            if (grabbed.compareAndSet(0, 1)) {
+                try {
+                    val frame = Yuv420Converter.toI420(image)
+                    streamer.submitFrame(frame)
+                    updateNotification("AV1 frame queued (${frame.width}x${frame.height})")
+                } catch (t: Throwable) {
+                    Log.e(TAG, "YUV → I420 conversion failed", t)
+                    updateNotification("AV1 conversion failed")
+                } finally {
+                    image.close()
+                    analysis.clearAnalyzer()
+                    shutdownCamera()
+                }
+            } else {
+                image.close()
+            }
+        }
+    }
+
+
 
     private fun shutdownCamera() {
         runCatching { cameraProvider.unbindAll() }
