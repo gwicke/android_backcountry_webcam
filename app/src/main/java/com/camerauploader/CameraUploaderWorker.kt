@@ -313,7 +313,7 @@ class CameraUploaderWorker(
         Log.d(TAG, "State → PICTURE_TAKEN — grabbing one YUV frame")
 
         val grabbed = AtomicInteger(0)
-        analysis.setAnalyzer(customExecutor) { image ->
+        analysis.setAnalyzer(CurrentThreadExecutor()) { image ->
             if (grabbed.compareAndSet(0, 1)) {
                 val frame = try {
                     Yuv420Converter.toI420(image)
