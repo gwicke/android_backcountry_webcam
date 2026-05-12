@@ -42,7 +42,6 @@ class CameraUploaderWorker(
     val cameraProvider: ProcessCameraProvider, val lifecycleRegistry: LifecycleRegistry,
     val lifeOwner: LifecycleOwner,
     val applicationContext: android.content.Context,
-    val service: CameraUploaderService,
     val updateNotification: (String)-> Unit) {
 
     // ── Preflight state machine constants ────────────────────────────────────
@@ -129,7 +128,7 @@ class CameraUploaderWorker(
                     .build()
                 imageCapture
             }
-            SettingsManager.UploadMode.AV1_STREAM -> {
+            SettingsManager.UploadMode.AV1 -> {
                 yuvAnalysis = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
@@ -247,8 +246,8 @@ class CameraUploaderWorker(
 
             captureState.set(State.PICTURE_TAKEN)
             when (uploadMode) {
-                SettingsManager.UploadMode.JPEG       -> shootJpegAndShutdown(imageCapture)
-                SettingsManager.UploadMode.AV1_STREAM -> shootYuvAndShutdown()
+                SettingsManager.UploadMode.JPEG -> shootJpegAndShutdown(imageCapture)
+                SettingsManager.UploadMode.AV1  -> shootYuvAndShutdown()
             }
         }
     }
@@ -304,12 +303,6 @@ class CameraUploaderWorker(
     }
 
 
-    /**
-     * AV1 mode: install a one-shot analyzer that grabs the next YUV frame
-     * delivered by [ImageAnalysis], converts it to contiguous I420, and
-     * hands it to the long-lived [Av1Streamer] owned by the service.  The
-     * camera is then released until the next alarm fires.
-     */
     private fun shootYuvAndShutdown() {
         val analysis = yuvAnalysis ?: run {
             Log.e(TAG, "shootYuvAndShutdown: no ImageAnalysis bound")
@@ -319,24 +312,28 @@ class CameraUploaderWorker(
         updateNotification("Capturing YUV frame…")
         Log.d(TAG, "State → PICTURE_TAKEN — grabbing one YUV frame")
 
-        val streamer = service.getOrCreateAv1Streamer()
         val grabbed = AtomicInteger(0)
         analysis.setAnalyzer(customExecutor) { image ->
-            // KEEP_ONLY_LATEST plus this guard ensures we submit exactly
-            // one frame per alarm cycle even if the analyzer sees the same
-            // surface twice before we manage to clear it.
             if (grabbed.compareAndSet(0, 1)) {
-                try {
-                    val frame = Yuv420Converter.toI420(image)
-                    streamer.submitFrame(frame)
-                    updateNotification("AV1 frame queued (${frame.width}x${frame.height})")
+                val frame = try {
+                    Yuv420Converter.toI420(image)
                 } catch (t: Throwable) {
                     Log.e(TAG, "YUV → I420 conversion failed", t)
                     updateNotification("AV1 conversion failed")
+                    null
                 } finally {
                     image.close()
                     analysis.clearAnalyzer()
                     shutdownCamera()
+                }
+                if (frame != null) {
+                    updateNotification("Encoding AV1 frame (${frame.width}x${frame.height})…")
+                    val obus = Av1Streamer.encodeToObus(frame)
+                    if (obus != null) {
+                        uploadAv1Frame(obus, frame.width, frame.height)
+                    } else {
+                        updateNotification("AV1 encoding failed")
+                    }
                 }
             } else {
                 image.close()
@@ -417,6 +414,51 @@ class CameraUploaderWorker(
         } catch (e: IOException) {
             Log.e(TAG, "Upload IOException", e)
             updateNotification("Upload error — retry in ${secs}s")
+        }
+    }
+
+    private fun uploadAv1Frame(obus: ByteArray, width: Int, height: Int) {
+        val ctx = applicationContext
+        val secs = SettingsManager.getIntervalSeconds(ctx)
+        val uploadUrl = SettingsManager.getUploadUrl(ctx)
+        if (uploadUrl.isBlank()) {
+            updateNotification("No URL — tap icon to configure.")
+            return
+        }
+        updateNotification("Uploading AV1 ${obus.size / 1024} KB…")
+        Log.d(TAG, "Uploading AV1 ${obus.size} bytes to $uploadUrl")
+
+        val timestamp = System.currentTimeMillis()
+        val body = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart(
+                "image", "capture_$timestamp.obu",
+                obus.toRequestBody("video/AV1".toMediaType())
+            )
+            .addFormDataPart("timestamp", timestamp.toString())
+            .addFormDataPart("batlevel", getBatteryLevel().toString())
+            .addFormDataPart("width", width.toString())
+            .addFormDataPart("height", height.toString())
+            .build()
+
+        val requestBuilder = Request.Builder().url(uploadUrl).post(body)
+        SettingsManager.getBasicAuthHeader(ctx)?.let { requestBuilder.header("Authorization", it) }
+
+        try {
+            httpClient.newCall(requestBuilder.build()).execute().use { response ->
+                if (response.isSuccessful) {
+                    Log.i(TAG, "AV1 upload OK: ${response.code}")
+                    updateNotification(
+                        "Last upload: ${android.text.format.DateFormat.format("HH:mm:ss", timestamp)} ✓"
+                    )
+                } else {
+                    Log.w(TAG, "AV1 upload failed: HTTP ${response.code}")
+                    updateNotification("AV1 upload failed (HTTP ${response.code}) — retry in ${secs}s")
+                }
+            }
+        } catch (e: IOException) {
+            Log.e(TAG, "AV1 upload IOException", e)
+            updateNotification("AV1 upload error — retry in ${secs}s")
         }
     }
 

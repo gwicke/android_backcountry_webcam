@@ -16,10 +16,6 @@ import androidx.core.app.NotificationCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
-import okhttp3.Dispatcher
-import okhttp3.OkHttpClient
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
 class CameraUploaderService : Service(), LifecycleOwner {
     companion object {
@@ -37,37 +33,6 @@ class CameraUploaderService : Service(), LifecycleOwner {
 
     // ── Camera ───────────────────────────────────────────────────────────────
     private var cameraProvider: ProcessCameraProvider? = null
-
-    // ── HTTP client (long-lived; shared by JPEG and AV1 paths) ───────────────
-    // Owned by the service so the AV1 streamer can keep one connection open
-    // across many camera captures and so connection pooling / keep-alive
-    // applies between back-to-back uploads.
-    private val httpDispatcher = Dispatcher(Executors.newFixedThreadPool(2))
-    val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(0, TimeUnit.SECONDS)   // long-running chunked POST
-        .readTimeout(60, TimeUnit.SECONDS)
-        .pingInterval(30, TimeUnit.SECONDS)
-        .dispatcher(httpDispatcher)
-        .build()
-
-    // ── AV1 streaming session (lazily started) ───────────────────────────────
-    private var av1Streamer: Av1Streamer? = null
-
-    /**
-     * Returns the singleton AV1 streamer for this service, opening it on
-     * first use.  The streamer owns its own threads and the encoder; the
-     * service owns the streamer.
-     */
-    @Synchronized
-    fun getOrCreateAv1Streamer(): Av1Streamer {
-        var s = av1Streamer
-        if (s == null) {
-            s = Av1Streamer(applicationContext, httpClient) { msg -> updateNotification(msg) }
-            av1Streamer = s
-        }
-        return s
-    }
 
     // ── LifecycleOwner for CameraX ────────────────────────────────────────────
     private val lifecycleRegistry = LifecycleRegistry(this)
@@ -92,8 +57,6 @@ class CameraUploaderService : Service(), LifecycleOwner {
 
     override fun onDestroy() {
         super.onDestroy()
-        av1Streamer?.stop()
-        av1Streamer = null
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
     }
 
@@ -107,7 +70,6 @@ class CameraUploaderService : Service(), LifecycleOwner {
     private fun postWorker() {
         CameraUploaderWorker(
             cameraProvider!!, lifecycleRegistry, this,
-            this,
             this,
             { s -> this.updateNotification(s) },
         ).run()

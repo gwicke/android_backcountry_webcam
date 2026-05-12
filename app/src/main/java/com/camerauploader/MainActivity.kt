@@ -147,8 +147,8 @@ class MainActivity : AppCompatActivity() {
         // ── Upload mode ──
         val modeLabel = label("Upload mode")
         val modeEntries = listOf(
-            SettingsManager.UploadMode.JPEG       to "JPEG (one image per capture)",
-            SettingsManager.UploadMode.AV1_STREAM to "AV1 streaming (low bandwidth)",
+            SettingsManager.UploadMode.JPEG to "JPEG (one image per capture)",
+            SettingsManager.UploadMode.AV1  to "AV1 (one OBU chunk per capture)",
         )
         val modeSpinner = Spinner(this).apply {
             val adapter = ArrayAdapter(
@@ -161,8 +161,8 @@ class MainActivity : AppCompatActivity() {
             setSelection(modeEntries.indexOfFirst { it.first == current }.coerceAtLeast(0))
         }
         val modeNote = TextView(this).apply {
-            text = "AV1 streaming continuously encodes YUV frames and sends them " +
-                "to your server as a single long-running chunked POST."
+            text = "AV1 encodes each YUV frame and sends the OBU chunks as the " +
+                "\"image\" field of a multipart POST, one POST per capture."
             textSize = 11f
             setTextColor(0xFF888888.toInt())
             setPadding(0, dpToPx(2), 0, 0)

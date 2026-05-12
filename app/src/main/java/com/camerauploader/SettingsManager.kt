@@ -26,8 +26,8 @@ object SettingsManager {
     enum class UploadMode {
         /** One JPEG per capture, multipart/form-data POST per image. */
         JPEG,
-        /** Continuous AV1-encoded YUV stream over a single chunked POST. */
-        AV1_STREAM;
+        /** One AV1 OBU chunk per capture, multipart/form-data POST per image. */
+        AV1;
 
         companion object {
             fun fromString(s: String?): UploadMode =
