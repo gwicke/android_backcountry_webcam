@@ -1,4 +1,4 @@
-# ThriftyCam — Android App
+# ThriftyCam - Android App
 
 Power and bandwidth efficient remote timelapse camera app. Takes a photo every
 N seconds / minutes / hours (configurable), and uploads it to a plain WebDAV /
