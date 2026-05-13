@@ -41,7 +41,6 @@ class CameraUploaderService : Service(), LifecycleOwner {
     // ── Threads ───────────────────────────────────────────────────────────────
     private lateinit var workerThread: HandlerThread
     private lateinit var workerHandler: Handler
-    private val mainHandler = Handler(android.os.Looper.getMainLooper())
 
     // ── Camera ───────────────────────────────────────────────────────────────
     private var cameraProvider: ProcessCameraProvider? = null
@@ -53,15 +52,13 @@ class CameraUploaderService : Service(), LifecycleOwner {
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    // ── Executor: YUV→I420 conversion + sendFirstFrame/sendFrame ─────────────
-    val encoderExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    var captureTime = 0L
 
     // ── Executor: getPacket() loop (AV1) or HTTP POST (JPEG) ─────────────────
     private val uploadExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
     // ── Persistent AV1 encoder (null until first AV1 frame) ──────────────────
     @Volatile private var av1Encoder: Av1Encoder? = null
-    // Only accessed from encoderExecutor (single-threaded) — no sync needed
     private var isFirstAv1Frame = true
 
     // ── LifecycleOwner for CameraX ────────────────────────────────────────────
@@ -88,9 +85,7 @@ class CameraUploaderService : Service(), LifecycleOwner {
     override fun onDestroy() {
         super.onDestroy()
         // Flush encoder: sendEos runs after any in-flight sendFrame
-        encoderExecutor.execute { av1Encoder?.sendEos() }
-        encoderExecutor.shutdown()
-        try { encoderExecutor.awaitTermination(5, TimeUnit.SECONDS) } catch (_: InterruptedException) {}
+        av1Encoder?.sendEos()
         // Reader loop exits on EOS; wait for it and any in-flight POST
         uploadExecutor.shutdown()
         try { uploadExecutor.awaitTermination(10, TimeUnit.SECONDS) } catch (_: InterruptedException) {}
@@ -107,12 +102,12 @@ class CameraUploaderService : Service(), LifecycleOwner {
 
     @OptIn(ExperimentalCamera2Interop::class)
     private fun postWorker() {
+        captureTime = System.currentTimeMillis()
         CameraUploaderWorker(
             cameraProvider!!, lifecycleRegistry, this,
             this,
             this,
-            { s -> this.updateNotification(s) },
-        ).run()
+        ) { s -> this.updateNotification(s) }.run()
     }
 
     private fun setupCamera() {
@@ -126,27 +121,27 @@ class CameraUploaderService : Service(), LifecycleOwner {
     /**
      * Submit a captured I420 frame to the persistent AV1 encoder.
      * Opens the encoder lazily on the first call and starts the packet reader
-     * loop.  All encoder API calls happen on [encoderExecutor].
+     * loop.
      */
     fun submitAv1Frame(frame: Av1Streamer.Frame) {
-        encoderExecutor.execute {
-            if (av1Encoder == null) {
-                val enc = Av1Encoder.open(frame.width, frame.height)
-                if (enc == null) {
-                    Log.e(TAG, "Failed to open AV1 encoder")
-                    updateNotification("AV1 encoder init failed")
-                    return@execute
-                }
-                av1Encoder = enc
-                startAv1ReaderLoop(enc)
+        if (av1Encoder == null) {
+            val enc = Av1Encoder.open(frame.width, frame.height)
+            if (enc == null) {
+                Log.e(TAG, "Failed to open AV1 encoder")
+                updateNotification("AV1 encoder init failed")
+                return
             }
-            val enc = av1Encoder ?: return@execute
-            if (isFirstAv1Frame) {
-                isFirstAv1Frame = false
-                enc.sendFirstFrame(frame.buf, frame.yStride, frame.uvStride)
-            } else {
-                enc.sendFrame(frame.buf, frame.yStride, frame.uvStride)
-            }
+            av1Encoder = enc
+            isFirstAv1Frame = true
+            startAv1ReaderLoop(enc)
+        }
+        captureTime = System.currentTimeMillis()
+        val enc = av1Encoder ?: return
+        if (isFirstAv1Frame) {
+            isFirstAv1Frame = false
+            enc.sendFirstFrame(frame.buf, frame.yStride, frame.uvStride)
+        } else {
+            enc.sendFrame(frame.buf, frame.yStride, frame.uvStride)
         }
     }
 
@@ -160,8 +155,16 @@ class CameraUploaderService : Service(), LifecycleOwner {
             while (true) {
                 enc.getPacket(pkt)
                 when (pkt.status) {
-                    Av1Encoder.Status.OK -> pkt.payload?.let { postImage(it, "video/AV1", "obu") }
-                    else -> break
+                    Av1Encoder.Status.OK -> pkt.payload?.let {
+                        postImage(it, "video/AV1",
+                            if (pkt.isKey) "key.av1" else "av1")
+                    }
+                    else -> {
+                        // Reset pipeline
+                        av1Encoder?.close()
+                        av1Encoder = null
+                        break
+                    }
                 }
             }
         }
@@ -192,10 +195,10 @@ class CameraUploaderService : Service(), LifecycleOwner {
         val body = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart(
-                "image", "capture_$timestamp.$ext",
+                "image", "$timestamp.$ext",
                 bytes.toRequestBody(mimeType.toMediaType())
             )
-            .addFormDataPart("timestamp", timestamp.toString())
+            .addFormDataPart("timestamp", (timestamp - captureTime).toString())
             .addFormDataPart("batlevel", getBatteryLevel().toString())
             .build()
         val req = Request.Builder().url(uploadUrl).post(body)
@@ -225,7 +228,7 @@ class CameraUploaderService : Service(), LifecycleOwner {
         return intent?.let {
             val level = it.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
             val scale = it.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
-            level * 100 / scale.toFloat()
+            level.toFloat() * 100f / scale.toFloat()
         }
     }
 

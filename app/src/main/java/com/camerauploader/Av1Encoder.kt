@@ -84,9 +84,9 @@ class Av1Encoder private constructor(
         fun open(
             width: Int,
             height: Int,
-            crf: Int = 35,
-            encMode: Int = 9,
-            parallelism: Int = 1,
+            crf: Int = 37,
+            encMode: Int = 10,
+            parallelism: Int = 0,
         ): Av1Encoder? {
             val h = nativeOpen(width, height, crf, encMode, parallelism)
             if (h == 0L) return null

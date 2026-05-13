@@ -20,6 +20,9 @@ import java.nio.ByteBuffer
  * chroma planes when needed.
  */
 object Yuv420Converter {
+    // Re-use buffers across conversions for efficiency
+    var outBuf: ByteBuffer = ByteBuffer.allocate(0)
+    var rowBuf: ByteArray = ByteArray(0)
 
     fun toI420(image: ImageProxy): Av1Streamer.Frame {
         val w = image.width
@@ -28,18 +31,37 @@ object Yuv420Converter {
         val uvStride = w / 2
         val ySize = yStride * h
         val uvSize = uvStride * (h / 2)
-        val out = ByteBuffer.allocateDirect(ySize + 2 * uvSize)
-
         val planes = image.planes
+        val yPlaneBuffer = planes[0].buffer
+        val uPlaneBuffer = planes[1].buffer
+        val vPlaneBuffer = planes[2].buffer
 
-        // ── Y plane: tight-pack into [0..ySize) ───────────────────────────
-        copyPlane(
-            src = planes[0].buffer,
-            srcRowStride = planes[0].rowStride,
-            srcPixelStride = planes[0].pixelStride,
-            width = w, height = h,
-            dst = out, dstOffset = 0, dstRowStride = yStride,
-        )
+        // Check if the planes are already backed by a contiguous buffer
+        if (planes[1].pixelStride == 1
+            && yPlaneBuffer.hasArray()
+            && yPlaneBuffer.array().size == ySize + 2 * uvSize
+            && uPlaneBuffer.hasArray()
+            && vPlaneBuffer.hasArray()
+            && yPlaneBuffer.array() === planes[1].buffer.array()
+            && yPlaneBuffer.array() === planes[2].buffer.array()
+            && yPlaneBuffer.arrayOffset() == 0
+        ) {
+            val arrayBuf = ByteBuffer.wrap(
+                planes[0].buffer.array(),
+                0, ySize + 2 * uvSize
+            )
+            // Reuse buffer as-is
+            return Av1Streamer.Frame(arrayBuf, w, h, yStride, uvStride)
+        }
+
+        if (outBuf.capacity() < ySize + 2 * uvSize) {
+            outBuf = ByteBuffer.allocateDirect(ySize + 2 * uvSize)
+        }
+
+        // ── Y plane: tight-pack into [0..ySize); always contiguous
+        outBuf.position(0)
+        yPlaneBuffer.position(0)
+        outBuf.put(yPlaneBuffer)
 
         // ── U plane ───────────────────────────────────────────────────────
         copyPlane(
@@ -47,7 +69,7 @@ object Yuv420Converter {
             srcRowStride = planes[1].rowStride,
             srcPixelStride = planes[1].pixelStride,
             width = w / 2, height = h / 2,
-            dst = out, dstOffset = ySize, dstRowStride = uvStride,
+            dst = outBuf, dstOffset = ySize, dstRowStride = uvStride,
         )
 
         // ── V plane ───────────────────────────────────────────────────────
@@ -56,11 +78,11 @@ object Yuv420Converter {
             srcRowStride = planes[2].rowStride,
             srcPixelStride = planes[2].pixelStride,
             width = w / 2, height = h / 2,
-            dst = out, dstOffset = ySize + uvSize, dstRowStride = uvStride,
+            dst = outBuf, dstOffset = ySize + uvSize, dstRowStride = uvStride,
         )
 
-        out.position(0)
-        return Av1Streamer.Frame(out, w, h, yStride, uvStride)
+        outBuf.position(0)
+        return Av1Streamer.Frame(outBuf, w, h, yStride, uvStride)
     }
 
     private fun copyPlane(
@@ -73,23 +95,28 @@ object Yuv420Converter {
         dstOffset: Int,
         dstRowStride: Int,
     ) {
-        val rowBuf = ByteArray(width)
-        for (row in 0 until height) {
-            val rowStart = row * srcRowStride
-            if (srcPixelStride == 1 && srcRowStride >= width) {
-                src.position(rowStart)
-                src.get(rowBuf, 0, width)
-            } else {
+        if (srcPixelStride == 1 && srcRowStride == width) {
+            // Contiguous plane, copy in one go
+            src.position(0)
+            dst.position(dstOffset)
+            dst.put(src)
+        } else {
+            // Interleaved, need to copy row by row
+            if (rowBuf.size != width) {
+                rowBuf = ByteArray(width)
+            }
+            for (row in 0 until height) {
+                val rowStart = row * srcRowStride
                 // Semi-planar (NV12/NV21): pixelStride == 2, samples interleaved.
                 var srcIdx = rowStart
                 for (col in 0 until width) {
                     rowBuf[col] = src.get(srcIdx)
                     srcIdx += srcPixelStride
                 }
+                val dstStart = dstOffset + row * dstRowStride
+                dst.position(dstStart)
+                dst.put(rowBuf, 0, width)
             }
-            val dstStart = dstOffset + row * dstRowStride
-            dst.position(dstStart)
-            dst.put(rowBuf, 0, width)
         }
     }
 }

@@ -32,11 +32,14 @@ set(RTC_BUILD                 ON  CACHE BOOL "" FORCE)
 # CRC32 ISAs that every arm64-v8a Android device supports.
 if(ANDROID_ABI STREQUAL "arm64-v8a")
     set(ENABLE_NEON           ON  CACHE BOOL "" FORCE)
-    set(ENABLE_ARM_CRC32      ON  CACHE BOOL "" FORCE)
+    set(ENABLE_ARM_CRC32      OFF  CACHE BOOL "" FORCE)
     set(ENABLE_NEON_DOTPROD   OFF CACHE BOOL "" FORCE)
     set(ENABLE_NEON_I8MM      OFF CACHE BOOL "" FORCE)
     set(ENABLE_SVE            OFF CACHE BOOL "" FORCE)
     set(ENABLE_SVE2           OFF CACHE BOOL "" FORCE)
+    # For older Android phones (e.g. Xiaomi Redmi 5), disable all ASM
+    add_compile_options(-march=armv8-a -mcpu=cortex-a53)
+    set(COMPILE_C_ONLY        ON  CACHE BOOL "" FORCE)
 elseif(ANDROID_ABI STREQUAL "x86_64")
     # x86_64 emulator builds — let SVT-AV1 use its NASM SIMD path if NASM is
     # found on the host, otherwise fall back to plain C.

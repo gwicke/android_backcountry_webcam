@@ -1,12 +1,12 @@
 package com.camerauploader
 
+import android.annotation.SuppressLint
+import android.graphics.ImageFormat
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.os.Build
-import android.os.Looper
 import android.util.Log
-import android.util.Size
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
@@ -19,10 +19,10 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceOrientedMeteringPointFactory
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
-import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicInteger
 
 @ExperimentalCamera2Interop
@@ -48,7 +48,8 @@ class CameraUploaderWorker(
     }
 
     lateinit var imageCapture: ImageCapture
-    private var yuvAnalysis: ImageAnalysis? = null
+
+    val yuvConverter: Yuv420Converter = Yuv420Converter
 
     private val uploadMode: SettingsManager.UploadMode
         get() = SettingsManager.getUploadMode(applicationContext)
@@ -57,6 +58,7 @@ class CameraUploaderWorker(
     // Outer cycle
     // ─────────────────────────────────────────────────────────────────────────
 
+    @SuppressLint("RestrictedApi")
     fun run() {
         Log.d(TAG, "Capture cycle started (mode=$uploadMode)")
         updateNotification("Preflight — warming up 3A…")
@@ -81,30 +83,23 @@ class CameraUploaderWorker(
                     val surface = android.view.Surface(st)
                     req.provideSurface(
                         surface,
-                        CurrentThreadExecutor()
+                        ContextCompat.getMainExecutor(service)
                     ) { surface.release(); st.release() }
                 }
             }
-
+        val captureBuilder = ImageCapture.Builder()
+            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+            .setFlashMode(ImageCapture.FLASH_MODE_OFF)
+            .setTargetRotation(android.view.Surface.ROTATION_90)
+            .setResolutionSelector(resolutionSelector)
         val secondaryUseCase: androidx.camera.core.UseCase = when (uploadMode) {
             SettingsManager.UploadMode.JPEG -> {
-                imageCapture = ImageCapture.Builder()
-                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-                    .setJpegQuality(85)
-                    .setFlashMode(ImageCapture.FLASH_MODE_OFF)
-                    .setTargetRotation(android.view.Surface.ROTATION_90)
-                    .setResolutionSelector(resolutionSelector)
-                    .build()
+                imageCapture = captureBuilder.setJpegQuality(85).build()
                 imageCapture
             }
             SettingsManager.UploadMode.AV1 -> {
-                yuvAnalysis = ImageAnalysis.Builder()
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
-                    .setResolutionSelector(resolutionSelector)
-                    .setTargetRotation(android.view.Surface.ROTATION_90)
-                    .build()
-                yuvAnalysis!!
+                imageCapture = captureBuilder.setBufferFormat(ImageFormat.YUV_420_888).build()
+                imageCapture
             }
         }
 
@@ -172,10 +167,7 @@ class CameraUploaderWorker(
         if (afReady && aeReady) {
             Log.d(TAG, "3A converged in ${elapsed}ms (af=$afState ae=$aeState)")
             captureState.set(State.PICTURE_TAKEN)
-            when (uploadMode) {
-                SettingsManager.UploadMode.JPEG -> shootJpegAndShutdown(imageCapture)
-                SettingsManager.UploadMode.AV1  -> shootYuvAndShutdown()
-            }
+            shootImageAndShutdown(imageCapture)
         }
     }
 
@@ -200,17 +192,31 @@ class CameraUploaderWorker(
     // Final capture
     // ─────────────────────────────────────────────────────────────────────────
 
-    private fun shootJpegAndShutdown(imageCapture: ImageCapture) {
+    private fun shootImageAndShutdown(imageCapture: ImageCapture) {
         updateNotification("Capturing image…")
         Log.d(TAG, "State → PICTURE_TAKEN — firing takePicture")
         imageCapture.takePicture(
-            CurrentThreadExecutor(),
+            ContextCompat.getMainExecutor(service),
             object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(image: ImageProxy) {
-                    val bytes = runCatching { imageProxyToBytes(image) }.getOrNull()
-                    image.close()
-                    shutdownCamera()
-                    if (bytes != null) service.uploadJpeg(bytes)
+                    if (uploadMode == SettingsManager.UploadMode.JPEG) {
+                        val bytes = runCatching { imageProxyToBytes(image) }.getOrNull()
+                        image.close()
+                        shutdownCamera()
+                        if (bytes != null) service.uploadJpeg(bytes)
+                    } else if (uploadMode == SettingsManager.UploadMode.AV1) {
+                        val frame = try {
+                            yuvConverter.toI420(image)
+                        } catch (t: Throwable) {
+                            Log.e(TAG, "YUV → I420 conversion failed", t)
+                            updateNotification("AV1 conversion failed")
+                            null
+                        } finally {
+                            image.close()
+                            shutdownCamera()
+                        }
+                        frame?.let { service.submitAv1Frame(it) }
+                    }
                 }
                 override fun onError(exc: ImageCaptureException) {
                     Log.e(TAG, "takePicture failed: ${exc.message}", exc)
@@ -220,43 +226,9 @@ class CameraUploaderWorker(
         )
     }
 
-    /**
-     * AV1 mode: grab one YUV frame, convert to I420 on [service.encoderExecutor],
-     * release the camera immediately, then hand the frame to the persistent encoder.
-     */
-    private fun shootYuvAndShutdown() {
-        val analysis = yuvAnalysis ?: run {
-            Log.e(TAG, "shootYuvAndShutdown: no ImageAnalysis bound")
-            shutdownCamera()
-            return
-        }
-        updateNotification("Capturing YUV frame…")
-        Log.d(TAG, "State → PICTURE_TAKEN — grabbing one YUV frame")
-
-        val grabbed = AtomicInteger(0)
-        // Analyzer runs on encoderExecutor: YUV→I420 copy + sendFrame both happen there.
-        analysis.setAnalyzer(service.encoderExecutor) { image ->
-            if (grabbed.compareAndSet(0, 1)) {
-                val frame = try {
-                    Yuv420Converter.toI420(image)
-                } catch (t: Throwable) {
-                    Log.e(TAG, "YUV → I420 conversion failed", t)
-                    updateNotification("AV1 conversion failed")
-                    null
-                } finally {
-                    image.close()
-                    analysis.clearAnalyzer()
-                    // cameraProvider.unbindAll() and lifecycleRegistry must run on main thread
-                    android.os.Handler(Looper.getMainLooper()).post { shutdownCamera() }
-                }
-                frame?.let { service.submitAv1Frame(it) }
-            } else {
-                image.close()
-            }
-        }
-    }
 
     private fun shutdownCamera() {
+        // cameraProvider.unbindAll() and lifecycleRegistry must run on main thread
         runCatching { cameraProvider.unbindAll() }
         captureState.set(State.PREVIEW)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
@@ -269,12 +241,5 @@ class CameraUploaderWorker(
     private fun imageProxyToBytes(image: ImageProxy): ByteArray {
         val buffer = image.planes[0].buffer
         return ByteArray(buffer.remaining()).also { buffer.get(it) }
-    }
-}
-
-
-class CurrentThreadExecutor : Executor {
-    override fun execute(r: Runnable) {
-        r.run()
     }
 }
